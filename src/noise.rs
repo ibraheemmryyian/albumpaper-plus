@@ -18,8 +18,7 @@ pub fn colored(geometry: [u32; 2], color1: [u8; 3], color2: [u8; 3], seed: u32) 
             Color::from_rgba8(color2[0], color2[1], color2[2], 255),
         ])
         .build::<LinearGradient>()
-        .unwrap()
-        .sharp(3, 0.1);
+        .unwrap();
 
     let ns = noise::OpenSimplex::new(seed);
     let mut imgbuf = RgbImage::new(width, height);

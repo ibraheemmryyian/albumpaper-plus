@@ -4,11 +4,16 @@ Classes in this file:
   SettingsWindow
 """
 
-from PySide2 import QtWidgets, QtGui, QtCore
-import os, glob
+from PySide6 import QtWidgets, QtGui, QtCore
+import os, glob, sys, subprocess
 
-from config import ConfigManager, ConfigValidationError
+from config import ConfigManager, ConfigValidationError, get_resource_path
 from wallpaper import Wallpaper
+
+
+def asset_path(relative_path):
+    """Helper to get asset paths that works with PyInstaller"""
+    return get_resource_path(relative_path)
 
 
 class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
@@ -27,7 +32,7 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
             pass
 
         default_wallpaper_item = self.context_menu.addAction(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/wallpaper.png"),
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/wallpaper.png")),
             "Set Default Wallpaper",
         )
         default_wallpaper_item.triggered.connect(self.set_default_wallpaper)
@@ -35,7 +40,7 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         self.context_menu.addSeparator()
 
         settings_item = self.context_menu.addAction(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/settings.png"), "Settings"
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/settings.png")), "Settings"
         )
         settings_item.triggered.connect(self.settings)
         self.settings_window = SettingsWindow(self)
@@ -43,7 +48,7 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         self.context_menu.addSeparator()
 
         self.help_menu = self.context_menu.addMenu(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/help.png"), "Help"
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/help.png")), "Help"
         )
         help_latest = self.help_menu.addAction("Latest Release")
         help_current = self.help_menu.addAction("This Release")
@@ -56,29 +61,29 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         )
 
         bug_report_item = self.context_menu.addAction(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/bug_report.png"), "Bug Report"
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/bug_report.png")), "Bug Report"
         )
         bug_report_item.triggered.connect(self.open_link(f"{github_link}issues"))
 
         release_item = self.context_menu.addAction(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/update.png"), f"{self.VERSION}"
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/update.png")), f"{self.VERSION}"
         )
         release_item.triggered.connect(self.open_link(f"{github_link}releases"))
 
         self.context_menu.addSeparator()
 
         self.pause_item = self.context_menu.addAction(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/pause.png"), "Pause"
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/pause.png")), "Pause"
         )
         self.pause_item.triggered.connect(self.toggle_pause)
 
         restart_item = self.context_menu.addAction(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/restart.png"), "Restart"
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/restart.png")), "Restart"
         )
         restart_item.triggered.connect(self.exit(1))
 
         exit_item = self.context_menu.addAction(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/close.png"), "Quit"
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/close.png")), "Quit"
         )
         exit_item.triggered.connect(self.exit(0))
 
@@ -88,6 +93,15 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         self.messageClicked.connect(
             self.open_link("https://github.com/jac0b-w/AlbumPaper/releases")
         )
+
+    def add_mini_player_toggle(self, mini_player):
+        action = QtGui.QAction("Mini Player", self.context_menu)
+        action.setCheckable(True)
+        action.setChecked(True)
+        action.triggered.connect(lambda checked: mini_player.show() if checked else mini_player.hide())
+        first = self.context_menu.actions()[0]
+        self.context_menu.insertAction(first, action)
+        self.context_menu.insertSeparator(first)
 
     def clicked(self, reason):
         # self.Trigger is left click
@@ -115,11 +129,11 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
 
         self.pause_item.setText(options["text"])
         self.pause_item.setIcon(
-            QtGui.QIcon(f"assets/icons/{self.icon_color}/{options['icon']}.png")
+            QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/{options['icon']}.png"))
         )
         self.pause_item.setEnabled(options["enabled"])
 
-        self.setIcon(QtGui.QIcon(f"assets/icons/{state}.png"))
+        self.setIcon(QtGui.QIcon(asset_path(f"assets/icons/{state}.png")))
 
     def set_default_wallpaper(self):
         Wallpaper.set_default()
@@ -142,7 +156,7 @@ class SettingsWindow(QtWidgets.QDialog):
         self.tray_icon = tray_icon
         self.setWindowTitle("Settings")
         self.setFixedSize(470, 0)
-        settings_icon_path = "assets/icons/black/settings.png"
+        settings_icon_path = asset_path("assets/icons/black/settings.png")
         if os.path.exists(settings_icon_path):
             self.setWindowIcon(QtGui.QIcon(settings_icon_path))
 
@@ -155,6 +169,9 @@ class SettingsWindow(QtWidgets.QDialog):
         self.main_layout.addRow(QtWidgets.QLabel(""))
         self.init_misc_section()
         self.main_layout.addRow(QtWidgets.QLabel(""))
+        if sys.platform != "win32":
+            self.init_system_theme_section()
+            self.main_layout.addRow(QtWidgets.QLabel(""))
 
         # Save button
         self.save_button = QtWidgets.QPushButton("Save")
@@ -195,12 +212,20 @@ class SettingsWindow(QtWidgets.QDialog):
             ConfigManager.services["spotify"]["client_secret"]
         )
 
+        self.spotify_sp_dc = QtWidgets.QLineEdit()
+        self.spotify_sp_dc.setPlaceholderText("sp_dc cookie (optional, enables lyrics)")
+        self.spotify_sp_dc.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        self.spotify_sp_dc.setText(
+            ConfigManager.services.get("spotify", {}).get("sp_dc", "") or ""
+        )
+
         widget = QtWidgets.QWidget()
         self.api_keys_stacked.addWidget(widget)
         layout = QtWidgets.QFormLayout()
         widget.setLayout(layout)
         layout.addRow("Client ID", self.spotify_client_id)
         layout.addRow("Client Secret", self.spotify_client_secret)
+        layout.addRow("sp_dc Cookie", self.spotify_sp_dc)
 
         # last.fm section
         self.lastfm_username = QtWidgets.QLineEdit()
@@ -311,14 +336,28 @@ class SettingsWindow(QtWidgets.QDialog):
             ConfigManager.settings["power"]["disable_on_battery_saver"]
         )
 
+    def init_system_theme_section(self):
+        self.system_theme_checkbox = QtWidgets.QCheckBox()
+        self.main_layout.addRow(
+            "Sync system light/dark + accent color", self.system_theme_checkbox
+        )
+        self.system_theme_checkbox.setChecked(
+            ConfigManager.settings["system_theme"]["sync_enabled"]
+        )
+
+        self.lockscreen_checkbox = QtWidgets.QCheckBox()
+        self.main_layout.addRow("Also update lock screen", self.lockscreen_checkbox)
+        self.lockscreen_checkbox.setChecked(
+            ConfigManager.settings["system_theme"]["update_lockscreen"]
+        )
+
     def save(self):
         service = ["spotify", "last.fm"][self.service_combo.currentIndex()]
         ConfigManager.settings["service"]["name"] = service
 
         ConfigManager.services["spotify"]["client_id"] = self.spotify_client_id.text()
-        ConfigManager.services["spotify"][
-            "client_secret"
-        ] = self.spotify_client_secret.text()
+        ConfigManager.services["spotify"]["client_secret"] = self.spotify_client_secret.text()
+        ConfigManager.services["spotify"]["sp_dc"] = self.spotify_sp_dc.text()
 
         ConfigManager.services["last.fm"]["api_key"] = self.lastfm_api_key.text()
         ConfigManager.services["last.fm"]["username"] = self.lastfm_username.text()
@@ -347,6 +386,14 @@ class SettingsWindow(QtWidgets.QDialog):
             "disable_on_battery_saver"
         ] = self.battery_saver_checkbox.isChecked()
 
+        if sys.platform != "win32":
+            ConfigManager.settings["system_theme"][
+                "sync_enabled"
+            ] = self.system_theme_checkbox.isChecked()
+            ConfigManager.settings["system_theme"][
+                "update_lockscreen"
+            ] = self.lockscreen_checkbox.isChecked()
+
         try:
             ConfigManager.save()  # save settings.ini and services.ini
         except ConfigValidationError as e:
@@ -356,11 +403,12 @@ class SettingsWindow(QtWidgets.QDialog):
             QtWidgets.QApplication.exit(1)  # send restart exit code
 
     def edit_themes(self):
-        try:
-            os.startfile("themes")
-        except FileNotFoundError:
+        if not os.path.isdir("themes"):
             os.makedirs("themes")
+        if sys.platform == "win32":
             os.startfile("themes")
+        else:
+            subprocess.Popen(["xdg-open", os.path.abspath("themes")])
 
     def background_setEnabled_check(self):
         """

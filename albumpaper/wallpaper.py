@@ -8,18 +8,28 @@ Classes in this file:
 """
 
 
-import os, ctypes, glob, shutil, collections, numpy, scipy.cluster, sklearn.cluster, random, functools
+import os, sys, glob, shutil, collections, numpy, scipy.cluster, sklearn.cluster, random, functools
 from typing import Optional
 from PIL import Image
-from config import ConfigManager
+from config import ConfigManager, get_app_dir
 from misc import timer, HashableImage
 import structs
+import logging
+
+log = logging.getLogger("app")
+
+if sys.platform == "win32":
+    import ctypes
+else:
+    import linux_desktop
 
 # rust functions
 import albumpaper_rs
 
-DEFAULT_WALLPAPER_PATH = "images/default_wallpaper.jpg"
-GENERATED_WALLPAPER_PATH = "images/generated_wallpaper.png"
+# Use app directory for writable files
+_app_dir = get_app_dir()
+DEFAULT_WALLPAPER_PATH = os.path.join(_app_dir, "images/default_wallpaper.jpg")
+GENERATED_WALLPAPER_PATH = os.path.join(_app_dir, "images/generated_wallpaper.png")
 
 
 def rust_image(method):
@@ -91,7 +101,7 @@ class GenerateWallpaper:
         """
         ar = numpy.asarray(hashable_image.image.resize((150, 150), 0))
         shape = ar.shape
-        ar = ar.reshape(numpy.product(shape[:2]), shape[2]).astype(
+        ar = ar.reshape(numpy.prod(shape[:2]), shape[2]).astype(
             float
         )  # flatten to shape (width*height, 3)
 
@@ -133,23 +143,28 @@ class GenerateWallpaper:
         max_rgb = max(color) / 255
         return (max_rgb + min_rgb) / 2
 
-    def color_saturation(
-        self, color
-    ):  # https://medium.com/@donatbalipapp/colours-maths-90346fb5abda
+    def color_saturation(self, color):
         """
         Input: RGB named tuple
-        Output: Saturation of the color 0-1
+        Output: Perceived vibrancy of the color, 0-1 (HSV saturation * value)
+
+        Raw HSV/HSL saturation is scale-invariant with brightness, so a
+        near-black pixel like (9, 0, 2) - e.g. JPEG shadow noise - scores
+        saturation 1.0 (min channel is 0) even though it reads as black,
+        not vivid. That previously let near-black pixels outscore genuinely
+        vivid colors and get picked as the "most saturated" gradient
+        endpoint. Weighting saturation by value (brightness) suppresses
+        near-black/near-white pixels while still ranking true vivid colors
+        highest, matching how palette-extraction tools (e.g. Android's
+        Palette API "vibrant" swatch) score vibrancy.
         """
-        min_rgb = min(color) / 255
         max_rgb = max(color) / 255
-        luminosity = self.color_luminosity(color)
-        if luminosity == 1:
+        min_rgb = min(color) / 255
+        if max_rgb == 0:
             return 0
-        else:
-            try:
-                return (max_rgb - min_rgb) / (1 - abs(2 * luminosity - 1))
-            except ZeroDivisionError:
-                return 1
+        saturation = (max_rgb - min_rgb) / max_rgb
+        value = max_rgb
+        return saturation * value
 
     def gradient_colors(
         self, image: Image.Image
@@ -174,14 +189,14 @@ class GenerateWallpaper:
         color_differences = [
             {
                 "color pair": (most_saturated, saturation_dict["color"]),
-                "difference": self.color_difference(
+                "score": self.color_difference(
                     most_saturated, saturation_dict["color"]
-                ),
+                ) * (0.5 + saturation_dict["saturation"]),
             }
             for saturation_dict in sorted_saturations[1:]
         ]
         sorted_color_differences = sorted(
-            color_differences, key=lambda x: x["difference"], reverse=True
+            color_differences, key=lambda x: x["score"], reverse=True
         )
 
         return sorted_color_differences[0]["color pair"]
@@ -285,6 +300,15 @@ class GenerateWallpaper:
             print("========== Generating new image ==========")
             self.gen_background(image)
 
+            if sys.platform != "win32" and ConfigManager.settings["system_theme"]["sync_enabled"]:
+                try:
+                    # most saturated dominant color - the same color picked as the
+                    # primary hue for the gradient/colored-noise backgrounds
+                    color, _ = self.gradient_colors(image)
+                    linux_desktop.sync_system_theme((color.r, color.g, color.b))
+                except Exception as e:
+                    log.error(f"System theme sync failed: {e}")
+
             Wallpaper.set(is_default=False)
         elif image == "default":
             Wallpaper.set(is_default=True)
@@ -293,11 +317,57 @@ class GenerateWallpaper:
 
 
 class Wallpaper:
+    # GNOME only repaints the desktop when org.gnome.desktop.background's
+    # picture-uri value actually *changes*. Since the wallpaper generator
+    # always overwrites the same GENERATED_WALLPAPER_PATH file, re-pointing
+    # GNOME at that identical path/URI on every track change emits no
+    # change signal and the old image stays on screen. Fix: copy each
+    # generated wallpaper to a freshly-named file and point GNOME there.
+    _GENERATED_VARIANTS_KEPT = 3
+    _generated_variant_counter = 0
+
+    @staticmethod
+    def _next_generated_variant_path() -> str:
+        Wallpaper._generated_variant_counter += 1
+        n = Wallpaper._generated_variant_counter % Wallpaper._GENERATED_VARIANTS_KEPT
+        base, ext = os.path.splitext(GENERATED_WALLPAPER_PATH)
+        return f"{base}_{n}{ext}"
+
     @staticmethod
     def set(is_default: bool):
-        file_name = DEFAULT_WALLPAPER_PATH if is_default else GENERATED_WALLPAPER_PATH
+        if is_default:
+            file_name = DEFAULT_WALLPAPER_PATH
+        elif sys.platform != "win32":
+            # Use a rotating unique filename so GNOME's picture-uri actually changes.
+            file_name = Wallpaper._next_generated_variant_path()
+            shutil.copyfile(GENERATED_WALLPAPER_PATH, file_name)
+        else:
+            file_name = GENERATED_WALLPAPER_PATH
+
         abs_path = os.path.abspath(file_name)
-        ctypes.windll.user32.SystemParametersInfoW(20, 0, abs_path, 0)
+
+        log.debug(f"Attempting to set wallpaper. Default={is_default}")
+        log.debug(f"Target file: {file_name}")
+        log.debug(f"Absolute path: {abs_path}")
+
+        if not os.path.exists(abs_path):
+            log.error(f"WALLPAPER FILE MISSING at {abs_path}")
+            return
+
+        if sys.platform == "win32":
+            # https://stackoverflow.com/a/56976219
+            result = ctypes.windll.user32.SystemParametersInfoW(20, 0, abs_path, 3)
+
+            if result:
+                log.info(f"SystemParametersInfoW success for {abs_path}")
+            else:
+                err = ctypes.GetLastError()
+                log.error(f"SystemParametersInfoW failed. Error code: {err}")
+        else:
+            update_lockscreen = ConfigManager.settings["system_theme"]["update_lockscreen"]
+            linux_desktop.set_wallpaper(abs_path, update_lockscreen=update_lockscreen)
+            log.info(f"Set GNOME wallpaper (lockscreen={update_lockscreen}) for {abs_path}")
+
         print("WALLPAPER SET: " + ("Default" if is_default else "Generated"))
 
     @staticmethod
@@ -311,23 +381,31 @@ class Wallpaper:
         # https://stackoverflow.com/questions/44867820/
         4. Finally if all fail just save use a blank image as the dafault wallpaper
         """
-        cached_folder = os.path.expandvars(
-            r"%APPDATA%\Microsoft\Windows\Themes\CachedFiles\*"
-        )
-        list_of_files = glob.glob(cached_folder)
-        if list_of_files:
-            current_wallpaper = max(list_of_files, key=os.path.getctime)
-        else:
-            current_wallpaper = os.path.expandvars(
-                r"%APPDATA%\Microsoft\Windows\Themes\TranscodedWallpaper"
+        if sys.platform == "win32":
+            cached_folder = os.path.expandvars(
+                r"%APPDATA%\Microsoft\Windows\Themes\CachedFiles\*"
             )
-        try:
-            shutil.copy(current_wallpaper, DEFAULT_WALLPAPER_PATH)
-        except FileNotFoundError:
-            ubuf = ctypes.create_unicode_buffer(200)
-            ctypes.windll.user32.SystemParametersInfoW(0x0073, 200, ubuf, 0)
+            list_of_files = glob.glob(cached_folder)
+            if list_of_files:
+                current_wallpaper = max(list_of_files, key=os.path.getctime)
+            else:
+                current_wallpaper = os.path.expandvars(
+                    r"%APPDATA%\Microsoft\Windows\Themes\TranscodedWallpaper"
+                )
             try:
-                shutil.copy(ubuf.value, DEFAULT_WALLPAPER_PATH)
+                shutil.copy(current_wallpaper, DEFAULT_WALLPAPER_PATH)
             except FileNotFoundError:
+                ubuf = ctypes.create_unicode_buffer(200)
+                ctypes.windll.user32.SystemParametersInfoW(0x0073, 200, ubuf, 0)
+                try:
+                    shutil.copy(ubuf.value, DEFAULT_WALLPAPER_PATH)
+                except FileNotFoundError:
+                    image = Image.new("RGB", (1, 1))
+                    image.save(DEFAULT_WALLPAPER_PATH, "JPEG", quality=100)
+        else:
+            current_wallpaper = linux_desktop.get_current_wallpaper()
+            try:
+                shutil.copy(current_wallpaper, DEFAULT_WALLPAPER_PATH)
+            except (FileNotFoundError, TypeError):
                 image = Image.new("RGB", (1, 1))
                 image.save(DEFAULT_WALLPAPER_PATH, "JPEG", quality=100)

@@ -1,17 +1,38 @@
 # external imports
-import os, sys, spotipy, requests, logging, logging.handlers, threading, pkg_resources, time
-from PySide2 import QtWidgets, QtGui, QtCore
+import os, sys, spotipy, requests, logging, logging.handlers, threading, time
+from packaging.version import parse as parse_version
+from PySide6 import QtWidgets, QtGui, QtCore
 from PIL import Image, ImageChops
 from io import BytesIO
 
 # In this directory
 from ui import SystemTrayIcon, SettingsWindow
-from config import ConfigManager, ConfigValidationError
+from config import ConfigManager, ConfigValidationError, get_resource_path, get_app_dir
 from wallpaper import Wallpaper, GenerateWallpaper
 from spotifyauth import SpotifyAuth
-import winapi, misc
+import winapi, misc, top_played
 
 VERSION = "v4.1.0"  # as tagged on github
+
+# logging
+log_path = os.path.join(get_app_dir(), "debug.log")
+app_log = logging.getLogger("app")
+app_log.setLevel(logging.DEBUG)
+
+# Add rotating file handler (10MB per file, keep 3 backups)
+try:
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=10*1024*1024, backupCount=3, encoding='utf-8', errors='replace'
+    )
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    app_log.addHandler(file_handler)
+except Exception as e:
+    print(f"Could not setup file logging: {e}")
+
+# Add console handler too
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+app_log.addHandler(console)
 
 """
 Displays a toast message if a new release is detected
@@ -30,9 +51,7 @@ def check_for_updates(tray_icon):
     if any(substring in latest_version for substring in ["alpha", "beta"]):
         return
 
-    if pkg_resources.parse_version(VERSION) < pkg_resources.parse_version(
-        latest_version
-    ):
+    if parse_version(VERSION) < parse_version(latest_version):
         tray_icon.showMessage("New update", f"Update {latest_version} available")
 
 
@@ -44,7 +63,7 @@ class CurrentArt:
             self.art_url = self.spotify_art_url
             self.spotify = SpotifyAuth(tray_icon.showMessage)
 
-        self.missing_art = Image.open("assets/missing_art.jpg").convert("RGB")
+        self.missing_art = Image.open(get_resource_path("assets/missing_art.jpg")).convert("RGB")
         self.previous_image_url = None
         self.previously_generated_url = None
 
@@ -52,14 +71,37 @@ class CurrentArt:
         try:
             self.spotify.refresh_token()
             current = self.spotify.api.currently_playing()
-            if current["is_playing"]:
-                return current["item"]["album"]["images"][0]["url"]
-            else:
-                return "default"
-        except spotipy.client.SpotifyException:  # Token expired
-            self.spotify.refresh_token()
-        except:  # local tracks, no devices playing
+            if current and current.get("is_playing"):
+                item = current.get("item")
+                if item:
+                    album = item.get("album")
+                    if album:
+                        images = album.get("images")
+                        if images and len(images) > 0:
+                            return images[0].get("url", "default")
             return "default"
+        except spotipy.client.SpotifyException as e:
+            if e.http_status == 429:
+                raise e
+            try:
+                self.spotify.refresh_token()
+                current = self.spotify.api.currently_playing()
+                if current and current.get("is_playing"):
+                    item = current.get("item")
+                    if item:
+                        album = item.get("album")
+                        if album:
+                            images = album.get("images")
+                            if images and len(images) > 0:
+                                return images[0].get("url", "default")
+                return "default"
+            except Exception as inner_e:
+                if isinstance(inner_e, spotipy.client.SpotifyException) and inner_e.http_status == 429:
+                    raise inner_e
+                return self.previous_image_url if self.previous_image_url else "default"
+        except Exception as e:
+            print(f"Spotify API Error: {e}")
+            return self.previous_image_url if self.previous_image_url else "default"
 
     def lastfm_request(self):
         try:
@@ -83,21 +125,26 @@ class CurrentArt:
 
     def lastfm_art_url(self):
         try:
-            current = self.lastfm_request()["recenttracks"]["track"][0]
-        except KeyError:  # Occurs when last.fm api fails (breifly) or API keys are invalid
-            return None
-        except:
-            # occurs with poor/no connection
+            request_data = self.lastfm_request()
+            if not request_data:
+                return self.previous_image_url if self.previous_image_url else "default"
+            
+            tracks = request_data.get("recenttracks", {}).get("track", [])
+            if not tracks:
+                return self.previous_image_url if self.previous_image_url else "default"
+            
+            current = tracks[0]
+            if current.get("@attr", {}).get("nowplaying", "").lower() == "true":
+                images = current.get("image", [])
+                if images and isinstance(images, list):
+                    url = images[0].get("#text", "")
+                    if url:
+                        return url.replace("/i/u/34s/", "/i/u/600x600/")
+            
             return "default"
-        try:
-            if current["@attr"]["nowplaying"].lower() == "true":
-                return current["image"][0]["#text"].replace(
-                    "/i/u/34s/", "/i/u/600x600/"
-                )  # find 600px version
-            else:  # when track is not playing
-                return "default"
-        except:  # occurs when the user isn't playing a track
-            return "default"
+        except Exception as e:
+            print(f"[ERROR] Last.fm art parsing error: {e}")
+            return self.previous_image_url if self.previous_image_url else "default"
 
     @staticmethod
     @misc.timer
@@ -138,11 +185,14 @@ class CurrentArt:
             art = self.get_image(image_url)
             if art is None:  # If image couldn't be downloaded
                 return "default"
+                return art
             # if downloaded image is last.fm missing_art image
             elif ImageChops.difference(art, self.missing_art).getbbox() is None:
+                app_log.debug("Downloaded image matches missing_art")
                 return "default"
             else:
                 self.previously_generated_url = image_url
+                app_log.debug(f"Returning new art image. URL: {image_url}")
                 return art
 
 
@@ -175,10 +225,41 @@ class BatterySaverCheckThread(QtCore.QThread):
                 raise e
 
 
+class ThrottleManager:
+    _path = os.path.join(get_app_dir(), "last_api_call.timestamp")
+
+    @classmethod
+    def can_make_call(cls, interval: float) -> bool:
+        if not os.path.exists(cls._path):
+            return True
+        try:
+            with open(cls._path, "r") as f:
+                last_call = float(f.read().strip())
+            return (time.time() - last_call) >= interval
+        except:
+            return True
+
+    @classmethod
+    def record_call(cls):
+        try:
+            with open(cls._path, "w") as f:
+                f.write(str(time.time()))
+        except Exception as e:
+            app_log.warning(f"Could not update throttle timestamp: {e}")
+
+
 class WorkerThread(QtCore.QThread):
+    auth_ready = QtCore.Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.sleep = threading.Event()  # Initialize here to avoid race condition
+        self.disabled = False
+        self.get_art = None
+
     def run(self):
         try:
-            self.sleep = threading.Event()  # improves pause responsiveness
+            self.sleep.set()  # Start in running state
 
             self._pause_request = ConfigManager.settings["miscellaneous"]["paused"]
             self._battery_saver = (
@@ -189,26 +270,91 @@ class WorkerThread(QtCore.QThread):
             self.disabled = ConfigManager.settings["miscellaneous"]["paused"]
 
             self.get_art = CurrentArt(service=ConfigManager.settings["service"]["name"])
+            if hasattr(self.get_art, 'spotify'):
+                self.auth_ready.emit(self.get_art.spotify)
 
             request_interval = ConfigManager.settings["service"]["request_interval"]
 
             wallaper_generator = GenerateWallpaper(app)
 
             while True:
-                if self.disabled:
-                    self.sleep.wait()
+                try:
+                    if self.disabled:
+                        self.sleep.wait()
 
-                start = time.time()
-                image = self.get_art.get_current_art()
-                wallaper_generator.generate(image)
+                    start = time.time()
+                    
+                    # Global Throttle Check
+                    if not ThrottleManager.can_make_call(request_interval):
+                        app_log.debug("Skipping iteration: Global throttle active")
+                        time.sleep(1)
+                        continue
 
-                if type(image) == Image.Image:
-                    print(f"TOTAL TIME = {time.time() - start}")
+                    app_log.debug("Worker iteration start")
+                    image = self.get_art.get_current_art()
+                    ThrottleManager.record_call()
+                    
+                    app_log.debug(f"get_current_art returned type: {type(image)}")
 
-                self.sleep.wait(request_interval)
+                    if image and image != "default":
+                        wallaper_generator.generate(image)
+                    elif image == "default":
+                         Wallpaper.set(is_default=True)
+
+                    if (
+                        ConfigManager.settings["service"]["name"] == "spotify"
+                        and hasattr(self.get_art, "spotify")
+                        and top_played.should_refresh()
+                    ):
+                        try:
+                            if top_played.refresh_default_wallpaper(
+                                self.get_art.spotify.api, wallaper_generator
+                            ):
+                                ConfigManager.settings["default_wallpaper"]["last_refresh"] = time.time()
+                                ConfigManager.save()
+                                if self.get_art.previous_image_url in ("default", None):
+                                    Wallpaper.set(is_default=True)
+                        except Exception as e:
+                            app_log.warning(f"Top-played wallpaper refresh failed: {e}")
+
+                    if type(image) == Image.Image:
+                        duration = time.time() - start
+                        app_log.info(f"Wallpaper generation took {duration:.2f}s")
+                        print(f"TOTAL TIME = {duration}")
+
+                except Exception as e:
+                    # Check for rate limit
+                    if "rate limit" in str(e).lower() or "429" in str(e):
+                        app_log.warning(f"Rate limited by Spotify: {e}")
+                        # Default to 60s if we can't parse the time
+                        sleep_time = 60
+                        try:
+                            import re
+                            match = re.search(r"Retry will occur after: (\d+) s", str(e))
+                            if match:
+                                sleep_time = int(match.group(1)) + 5
+                        except: pass
+                        
+                        tray_icon.showMessage("Rate Limited", f"Spotify API limited. Sleeping for {sleep_time}s")
+                        time.sleep(sleep_time)
+                    else:
+                        app_log.exception(f"Worker Loop Error: {e}")
+                        # Don't crash the thread, just wait a bit and retry
+                        time.sleep(5)
+
+                # Correct wait logic: Sleep for interval. 
+                # self.sleep.wait returns instantly if set (running).
+                # So we must use time.sleep.
+                # Use small increments to verify 'disabled' flag more responsively
+                slept = 0
+                while slept < request_interval:
+                    if self.disabled:
+                         break
+                    time.sleep(1)
+                    slept += 1
 
         except Exception as e:
-            app_log.exception("Worker Error")
+            app_log.exception("Fatal Worker Error")
             if __debug__:
                 raise e
 
@@ -297,8 +443,7 @@ class OnStartup:
 
     @staticmethod
     def start_QApplication():
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+        # High DPI scaling is enabled by default in PySide6
         try:
             app = QtWidgets.QApplication(sys.argv)
         except RuntimeError:  # occurs on restart
@@ -314,15 +459,44 @@ exit_code = 1, restart app
 exit_code = 0, quit app
 """
 
-if __name__ in "__main__":
-
+if __name__ == "__main__":
+    app_log.info(f"Module loaded. Version {VERSION}")
+    
     exit_code = 1
+    
+    # Global exception handler
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        app_log.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+    
+    sys.excepthook = handle_exception
+
+    # Single-instance guard for the OS process. Must be acquired exactly once,
+    # outside the restart loop below: restarting (exit_code=1) re-runs this
+    # process's own loop body, and re-acquiring the same lock from the same
+    # process every restart would self-deadlock (the previous iteration's
+    # lock is only released after the loop ends).
+    try:
+        mutex = winapi.NamedMutex(b"AlbumPaper")
+        app_log.info("App started successfully (Mutex acquired)")
+    except winapi.MutexNotAquiredError:
+        app_log.warning("App already running (mutex locked)")
+        sys.exit(0)
 
     while exit_code == 1:
         exit_code = 0
-        app_log = OnStartup.start_logger()
         try:
-            app = OnStartup.start_QApplication()
+            # We skip OnStartup.start_logger() as we configured logging manually
+
+            # Start QApplication manually to ensure we control it
+            try:
+                app = QtWidgets.QApplication(sys.argv)
+            except RuntimeError:
+                app = QtWidgets.QApplication.instance()
+
+            app.setQuitOnLastWindowClosed(False)
 
             widget = QtWidgets.QWidget()
             pause_state_signals = PauseStateSignals()
@@ -330,18 +504,12 @@ if __name__ in "__main__":
             pause_state_manager = PauseStateManager(pause_state_signals)
 
             tray_icon = SystemTrayIcon(
-                icon=QtGui.QIcon("assets/icons/enabled.png"),
+                icon=QtGui.QIcon(get_resource_path("assets/icons/enabled.png")),
                 parent=widget,
                 signal=pause_state_signals,
                 version=VERSION,
                 pause_state_manager=pause_state_manager,
             )
-
-            try:
-                mutex = winapi.NamedMutex(b"AlbumPaper")
-            except winapi.MutexNotAquiredError:
-                tray_icon.showMessage("App already open", "")
-                sys.exit()
 
             tray_icon.show()
 
@@ -357,7 +525,7 @@ if __name__ in "__main__":
             except ConfigValidationError as e:
                 tray_icon.showMessage(e.message, "")
                 settings_window = SettingsWindow(tray_icon)
-                exit_code = settings_window.exec_()
+                exit_code = settings_window.exec()
             else:
                 battery_saver_check_thread = BatterySaverCheckThread(
                     pause_state_manager
@@ -369,18 +537,24 @@ if __name__ in "__main__":
 
                 pause_state_signals.pause_state.connect(tray_icon.pause_state)
 
+
                 worker_thread.finished.connect(app.exit)
                 worker_thread.start(priority=QtCore.QThread.LowPriority)
 
                 pause_state_manager._send_signal()
-
-                exit_code = app.exec_()
+                
+                app_log.info("Entering Main Event Loop")
+                exit_code = app.exec()
 
                 worker_thread.terminate()
 
         except Exception as e:
-            app_log.exception("main error")
+            app_log.exception("Fatal Main Error")
             if __debug__:
-                raise e
-
-    mutex.release()
+                 # Keep window open if possible or just log?
+                 pass
+            # If crash, exit loop to avoid infinite restart loop on fatal error
+            exit_code = 0
+            
+    if 'mutex' in locals():
+        mutex.release()
