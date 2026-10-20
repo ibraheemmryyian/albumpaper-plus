@@ -19,7 +19,7 @@ def asset_path(relative_path):
 class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
     def __init__(self, icon, parent, signal, version, pause_state_manager):
         QtWidgets.QSystemTrayIcon.__init__(self, icon, parent)
-        self.setToolTip("AlbumPaper")
+        self.setToolTip("AlbumPaper-Plus")
         self.context_menu = QtWidgets.QMenu(parent)
         self.signal = signal
         self.VERSION = version
@@ -52,13 +52,15 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         )
         help_latest = self.help_menu.addAction("Latest Release")
         help_current = self.help_menu.addAction("This Release")
-        github_link = "https://github.com/jac0b-w/AlbumPaper/"
+        github_link = "https://github.com/ibraheemmryyian/AlbumPaper-Plus/"
         help_latest.triggered.connect(
             self.open_link(f"{github_link}blob/master/README.md")
         )
         help_current.triggered.connect(
             self.open_link(f"{github_link}blob/{self.VERSION}/README.md")
         )
+        help_original = self.help_menu.addAction("Original AlbumPaper (jac0b-w)")
+        help_original.triggered.connect(self.open_link("https://github.com/jac0b-w/AlbumPaper/"))
 
         bug_report_item = self.context_menu.addAction(
             QtGui.QIcon(asset_path(f"assets/icons/{self.icon_color}/bug_report.png")), "Bug Report"
@@ -91,17 +93,8 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         self.activated.connect(self.clicked)
 
         self.messageClicked.connect(
-            self.open_link("https://github.com/jac0b-w/AlbumPaper/releases")
+            self.open_link("https://github.com/ibraheemmryyian/AlbumPaper-Plus/releases")
         )
-
-    def add_mini_player_toggle(self, mini_player):
-        action = QtGui.QAction("Mini Player", self.context_menu)
-        action.setCheckable(True)
-        action.setChecked(True)
-        action.triggered.connect(lambda checked: mini_player.show() if checked else mini_player.hide())
-        first = self.context_menu.actions()[0]
-        self.context_menu.insertAction(first, action)
-        self.context_menu.insertSeparator(first)
 
     def clicked(self, reason):
         # self.Trigger is left click
@@ -212,20 +205,12 @@ class SettingsWindow(QtWidgets.QDialog):
             ConfigManager.services["spotify"]["client_secret"]
         )
 
-        self.spotify_sp_dc = QtWidgets.QLineEdit()
-        self.spotify_sp_dc.setPlaceholderText("sp_dc cookie (optional, enables lyrics)")
-        self.spotify_sp_dc.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self.spotify_sp_dc.setText(
-            ConfigManager.services.get("spotify", {}).get("sp_dc", "") or ""
-        )
-
         widget = QtWidgets.QWidget()
         self.api_keys_stacked.addWidget(widget)
         layout = QtWidgets.QFormLayout()
         widget.setLayout(layout)
         layout.addRow("Client ID", self.spotify_client_id)
         layout.addRow("Client Secret", self.spotify_client_secret)
-        layout.addRow("sp_dc Cookie", self.spotify_sp_dc)
 
         # last.fm section
         self.lastfm_username = QtWidgets.QLineEdit()
@@ -357,7 +342,6 @@ class SettingsWindow(QtWidgets.QDialog):
 
         ConfigManager.services["spotify"]["client_id"] = self.spotify_client_id.text()
         ConfigManager.services["spotify"]["client_secret"] = self.spotify_client_secret.text()
-        ConfigManager.services["spotify"]["sp_dc"] = self.spotify_sp_dc.text()
 
         ConfigManager.services["last.fm"]["api_key"] = self.lastfm_api_key.text()
         ConfigManager.services["last.fm"]["username"] = self.lastfm_username.text()

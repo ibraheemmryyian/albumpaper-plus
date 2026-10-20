@@ -12,7 +12,7 @@ from wallpaper import Wallpaper, GenerateWallpaper
 from spotifyauth import SpotifyAuth
 import winapi, misc, top_played
 
-VERSION = "v4.1.0"  # as tagged on github
+VERSION = "v1.0.0"  # as tagged on github (fork of jac0b-w/AlbumPaper v4.1.0)
 
 # logging
 log_path = os.path.join(get_app_dir(), "debug.log")
@@ -43,7 +43,7 @@ def check_for_updates(tray_icon):
 
     try:
         response = requests.get(
-            "https://api.github.com/repos/jac0b-w/AlbumPaper/releases/latest",
+            "https://api.github.com/repos/ibraheemmryyian/AlbumPaper-Plus/releases/latest",
         )
         latest_version: str = response.json()["tag_name"]
     except Exception:
@@ -106,7 +106,7 @@ class CurrentArt:
     def lastfm_request(self):
         try:
             # define headers and URL
-            headers = {"user-agent": "AlbumPaper"}
+            headers = {"user-agent": "AlbumPaper-Plus"}
             url = "http://ws.audioscrobbler.com/2.0/"
 
             payload = {
@@ -479,7 +479,7 @@ if __name__ == "__main__":
     # process every restart would self-deadlock (the previous iteration's
     # lock is only released after the loop ends).
     try:
-        mutex = winapi.NamedMutex(b"AlbumPaper")
+        mutex = winapi.NamedMutex(b"AlbumPaper-Plus")
         app_log.info("App started successfully (Mutex acquired)")
     except winapi.MutexNotAquiredError:
         app_log.warning("App already running (mutex locked)")

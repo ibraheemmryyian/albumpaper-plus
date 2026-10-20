@@ -372,7 +372,7 @@ class Wallpaper:
 
     @staticmethod
     def set_default():
-        """
+        r"""
         1. First look in %APPDATA%\Microsoft\Windows\Themes\CachedFiles
         and use most recent image (this will have the resolution of the desktop)
         2. If that fails look for %APPDATA%\Microsoft\Windows\Themes\TranscodedWallpaper

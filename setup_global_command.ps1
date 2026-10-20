@@ -11,8 +11,8 @@ if ($UserPath -notlike "*$ProjectDir*") {
 }
 
 # Create a PowerShell alias for the current session
-New-Alias -Name albumpaper -Value (Join-Path $ProjectDir "AlbumPaper.bat") -Force
+New-Alias -Name albumpaper-plus -Value (Join-Path $ProjectDir "AlbumPaper-Plus.bat") -Force
 
-Write-Host "`nGlobal command 'AlbumPaper' (or 'albumpaper') is now set up!" -ForegroundColor Green
+Write-Host "`nGlobal command 'AlbumPaper-Plus' (or 'albumpaper-plus') is now set up!" -ForegroundColor Green
 Write-Host "You may need to restart your terminal for the PATH changes to take full effect." -ForegroundColor Yellow
-Write-Host "Try typing: albumpaper"
+Write-Host "Try typing: albumpaper-plus"
